@@ -1,0 +1,91 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath}
+\title{Friday Harbour 2015, Rush data analysis 3}
+\author{Terry Therneau}
+
+\addtolength{\textwidth}{.5in}
+\addtolength{\oddsidemargin}{-.255in}
+\setlength{\evensidemargin}{\oddsidemargin}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\usepackage{Sweave}
+\begin{document}
+\input{analysis4b-concordance}
+%\SweaveOpts{concordance=TRUE}
+
+
+
+\maketitle
+\section{Notes}
+  This is a reprise and extention of the original analysis, using some
+of the tools in the newer release (2.39-4) of the R survival library.
+In the .Rnw file from which the pdf is generated, change the knitr
+option \code{echo} to TRUE in order to see all of the R code used to
+create the report.  
+
+\section{Data}
+The data set is deficient in that we have the death age for those who
+have died, but only the last cognitive visit for those still alive.
+Verbally, I was reassured at the meeting that no one is lost to follow
+up, at least with respect to death, and thus one could use the date on which
+the data set was created as the last known alive date.
+(This fact does us no practical good, however, since the enrollment date is
+not included in the distributed data.)
+
+Now if this follow-up statement were true and subjects faithfully come back
+for yearly visits, 
+then one would expect that the interval between
+the last visit and death, for those who have died, would be approximately
+uniformly distributed over a 0-12 month interval.
+
+One nuisance: age in years is a long decimal value, truncated to a fixed number
+of digits in the csv file.  This leads to some computed ages that should be the
+same but differ by machine roundoff, which in turn caused some head scratching
+at one point in the analysis.  Hence we first converted to an
+integer age in days and used that for all intermediate calculations.
+
+\section{Time scales}
+In this study we have a choice of time-from-enrollment or time-from-birth (age)
+as the underlying time scale for the Cox model.  
+Which one should we choose?
+A general rule of thumb for Cox models is to use the time scale that is
+most important as the baseline time and model any others.
+That is, if you had a choice to be told either how old a subject was or how
+long they had been on study, which one would tell you more about their
+expected event rate, i.e., death?   In this study I would argue for age
+as the dominant scale.
+By using age as the underlying time scale for our models, the compuatations 
+at each event compare the subject who dies to all others of the 
+same age as a matched set.  Age ceases to be a confounder.
+
+In this data set we saw that time-since-enrollment is also a predictor due to
+enrollment bias.
+It can be modeled reasonably well as a linear term over the first 8 years
+of follow-up.  
+Thinking through how this should be included in the data sets and entered into
+the modeling took up a fair bit of my thinking time, but in the end it seems
+that I need not have worried so much. Follow-up year is mostly uncorrelated
+with the covariates we care about, so adding ftime to the model makes 
+only minor
+changes in estimated effects.  
+It does increase the overall goodness of fit for the model,
+but that turns out to be secondary.
+
+If instead we had used time-since-enrollment as the time scale, then 
+the honeymoon effect is swept into the baseline hazard and can be ignored.
+However, age then needs to be included in the models as a covariate.
+Age is a dominating effect (for death), so one has to
+model it correctly and with precision.  If other covariates of interest are
+correlated with age, then any imprecision in the age model will badly confound 
+estimates for these other variables.  Interactions of age and covariates
+are also important terms.
+
+One thing that age scale models cannot do is answer questions such as
+``how much of the increase in deaths with age is due to increasing blood
+pressure''?  This question views age as a bystander rather than a root cause.
+A Cox model on age scale addresses instead the excess risk question: for
+two subjects of the same age, how much does high blood pressure increase
+the relative risk of death for one versus the other.  Age is firmly fixed as
+the root and other covariates as modifiers.
+
+\section{Fits}

@@ -1,0 +1,282 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath}
+\title{Friday Harbour 2015, Rush data analysis 3}
+\author{Terry Therneau}
+
+\addtolength{\textwidth}{.5in}
+\addtolength{\oddsidemargin}{-.255in}
+\setlength{\evensidemargin}{\oddsidemargin}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\begin{document}
+\SweaveOpts{concordance=TRUE}
+%\SweaveOpts{concordance=TRUE}
+
+
+<<echo=FALSE>>=
+setwd("~/Dropbox/friday harbor 2015 group project/UpdatedAnalysis")
+require("knitr")
+require("survival")
+require("splines")
+require('xtable')
+library(ggplot2)
+opts_chunk$set(comment=NA, tidy=FALSE, highlight=FALSE, echo=FALSE,fig.with=6.5, fig.height=5.3, fig.path="figures/",out.width="\\textwidth", out.height="!", device="pdf",cache=TRUE, warning=FALSE, error=FALSE)
+knit_hooks$set(small.mar = function(before, options, envir) {
+    if (before) par(mar=c(4.1, 4.1, .1, .1))
+})
+options(show.signif.stars = FALSE)  #display intellegence
+options(na.action=na.exclude)  #retain missing in predict() calls
+mytab <- function(...) table(..., useNA='ifany')
+
+require(RColorBrewer)
+palette(c("black", brewer.pal(4, "RdYlBu")[c(1,2,4,3)], "darkgreen"))
+load('rush.rda')
+rfirst <- which(!duplicated(rush2$id)) # first obs for each subject
+rlast  <- c(rfirst[-1] -1, nrow(rush2)) #last obs for each subject
+@ 
+
+\maketitle
+\section{Notes}
+  This is a reprise and extention of the original analysis, using some
+of the tools in the newer release (2.39-4) of the R survival library.
+In the .Rnw file from which the pdf is generated, change the knitr
+option \code{echo} to TRUE in order to see all of the R code used to
+create the report.  
+
+\section{Data}
+The data set is deficient in that we have the death age for those who
+have died, but only the last cognitive visit for those still alive.
+Verbally, I was reassured at the meeting that no one is lost to follow
+up, at least with respect to death, and thus one could use the date on which
+the data set was created as the last known alive date.
+(This fact does us no practical good, however, since the enrollment date is
+not included in the distributed data.)
+
+Now if this follow-up statement were true and subjects faithfully come back
+for yearly visits, 
+then one would expect that the interval between
+the last visit and death, for those who have died, would be approximately
+uniformly distributed over a 0-12 month interval.
+
+One nuisance: age in years is a long decimal value, truncated to a fixed number
+of digits in the csv file.  This leads to some computed ages that should be the
+same but differ by machine roundoff, which in turn caused some head scratching
+at one point in the analysis.  Hence we first converted to an
+integer age in days and used that for all intermediate calculations.
+
+\section{Time scales}
+In this study we have a choice of time-from-enrollment or time-from-birth (age)
+as the underlying time scale for the Cox model.  
+Which one should we choose?
+A general rule of thumb for Cox models is to use the time scale that is
+most important as the baseline time and model any others.
+That is, if you had a choice to be told either how old a subject was or how
+long they had been on study, which one would tell you more about their
+expected event rate, i.e., death?   In this study I would argue for age
+as the dominant scale.
+By using age as the underlying time scale for our models, the compuatations 
+at each event compare the subject who dies to all others of the 
+same age as a matched set.  Age ceases to be a confounder.
+
+In this data set we saw that time-since-enrollment is also a predictor due to
+enrollment bias.
+It can be modeled reasonably well as a linear term over the first 8 years
+of follow-up.  
+Thinking through how this should be included in the data sets and entered into
+the modeling took up a fair bit of my thinking time, but in the end it seems
+that I need not have worried so much. Follow-up year is mostly uncorrelated
+with the covariates we care about, so adding ftime to the model makes 
+only minor
+changes in estimated effects.  
+It does increase the overall goodness of fit for the model,
+but that turns out to be secondary.
+
+If instead we had used time-since-enrollment as the time scale, then 
+the honeymoon effect is swept into the baseline hazard and can be ignored.
+However, age then needs to be included in the models as a covariate.
+Age is a dominating effect (for death), so one has to
+model it correctly and with precision.  If other covariates of interest are
+correlated with age, then any imprecision in the age model will badly confound 
+estimates for these other variables.  Interactions of age and covariates
+are also important terms.
+
+One thing that age scale models cannot do is answer questions such as
+``how much of the increase in deaths with age is due to increasing blood
+pressure''?  This question views age as a bystander rather than a root cause.
+A Cox model on age scale addresses instead the excess risk question: for
+two subjects of the same age, how much does high blood pressure increase
+the relative risk of death for one versus the other.  Age is firmly fixed as
+the root and other covariates as modifiers.
+
+\section{Fits}
+<<ctable,echo = FALSE>>=
+## ADD ANYE4 variable
+e4 = rush2[!duplicated(rush2$id),c('id','anye4')]
+e4$anye4 = factor(e4$anye4,levels = c(0,1),labels = c('e4Neg','e4Pos'))
+timed = merge(timed,e4,by = 'id',all.x = TRUE)
+brdata = merge(brdata,e4,by = 'id',all.x = TRUE)
+cedata =  merge(cedata,e4,by = 'id',all.x = TRUE)
+tddata =  merge(tddata,e4,by = 'id',all.x = TRUE)
+brcedata = merge(brcedata,e4,by = 'id',all.x = TRUE)
+# build a table of coefficients
+# Only use necessary cog variables
+#cname <- c("cogn_global", "cogn_ep", "cogn_se", "cogn_wo", "cogn_ps","cogn_po")
+
+cname <- c("cogn_global", "cogn_ep")
+ctable <- matrix(0, 14, (length(cname)*2*2)) #cognitive variable, outcome,
+contrast <- function(fit, cmat) {
+    cbind(estimate = as.vector(cmat %*% coef(fit)),
+          se = sqrt(diag(cmat %*% vcov(fit) %*% t(cmat))))
+}
+cmat <- function(fit, ngrp=4) {
+    # contrast matrix, assuming the effect is last
+    ncoef <- length(coef(fit)) 
+    cmat <- matrix(0, ngrp, ncoef)
+    offset <- ncoef - ngrp  #number of 0 coefficients
+    cmat[1:ngrp, offset+ 1] <- 1
+    for (i in 2:ngrp) cmat[i, offset +i] <- 1
+    cmat
+}
+## Copathology table. 12 endtypes (unique(brcedata$etype))
+copathtable = matrix(0, 12, (length(cname)*2*2))
+
+atable <- matrix(0, nrow = 2*length(cname), ncol = 10)
+for (i in 1:length(cname)) {
+    temp <- timed[[cname[i]]]
+    tfitg <- coxph(Surv(startage, endage, brstat>0) ~ temp + strata(study), timed)
+    tfitg2<- coxph(Surv(startage, endage, brstat>0) ~ temp + anye4+strata(study) + sex + smoking + edu.grp + vascular + fyear, timed)
+    atable[(2*i-1),] <- c(coef(tfitg), coef(tfitg2))
+    atable[(2*i),] = c(data.frame(summary(tfitg)[['coefficients']])$se.coef.,data.frame(summary(tfitg2)[['coefficients']])$se.coef.)
+
+    ## BRAAK
+    temp <- brdata[[cname[i]]]
+    tfit1 <- coxph(Surv(startage, endage, status) ~ temp *strata(etype) + strata(study), brdata)
+    tfit2 <- coxph(Surv(startage, endage, status) ~ sex + smoking + anye4+
+                     edu.grp+ vascular + fyear + temp *strata(etype)+strata(study),brdata)
+    
+    ctable[1:4, (2*i-1):(2*i)]  <- contrast(tfit1, cmat(tfit1, 4))
+    ctable[1:4, (4+(2*i-1)):(4+(2*i))] <- contrast(tfit2, cmat(tfit2, 4))
+
+    ## reprise for CERAD
+    temp <- cedata[[cname[i]]]
+    tfit1 <- coxph(Surv(startage, endage, status) ~ temp *strata(etype) +
+                   strata(study), cedata)
+    tfit2 <- coxph(Surv(startage, endage, status) ~ sex + smoking + anye4 + edu.grp+ vascular + fyear + temp *strata(etype) + strata(study),cedata)
+    ctable[5:9, (2*i-1):(2*i)]  <- contrast(tfit1, cmat(tfit1, 5))
+    ctable[5:9, (4+(2*i-1)):(4+(2*i))] <- contrast(tfit2, cmat(tfit2, 5))
+   
+    ## Now for TDP
+    temp <- tddata[[cname[i]]]
+    tfit1 <- coxph(Surv(startage, endage, status) ~ temp *strata(etype) 
+                   + strata(study), tddata)
+    tfit2 <- coxph(Surv(startage, endage, status) ~ sex  + smoking + anye4 + edu.grp
+                  + vascular + fyear + temp *strata(etype) + strata(study), 
+                   tddata)
+    ctable[10:14, (2*i-1):(2*i)]  <- contrast(tfit1, cmat(tfit1, 5))
+    ctable[10:14, (4+(2*i-1)):(4+(2*i))] <- contrast(tfit2, cmat(tfit2, 5))
+
+ ##CoPath, BRAAK & CERAD
+    temp <- brcedata[[cname[i]]]
+    tfit1 <- coxph(Surv(startage, endage, status) ~ temp *strata(etype) + strata(study), brcedata)
+    tfit2 <- coxph(Surv(startage, endage, status) ~ sex  + smoking + anye4 + edu.grp
+                  + vascular + fyear + temp *strata(etype) + strata(study), 
+                   brcedata)
+    copathtable[, (2*i-1):(2*i)]  <- contrast(tfit1, cmat(tfit1, 12))
+    copathtable[, (4+(2*i-1)):(4+(2*i))] <- contrast(tfit2, cmat(tfit2, 12))
+
+}
+
+
+## Name tables
+colnamestabs = c(
+  unlist(lapply(c('Global','EP'),function(x){c(paste(x,'UnAdj',sep='_'),paste(x,'SE',sep='_'))})),
+  unlist(lapply(c('Global','EP'),function(x){c(paste(x,'Adj',sep='_'),paste(x,'SE',sep='_'))})))
+ 
+
+clabel <- c("Braak 0-2", "Braak 3-4", "Braak 5-6", "Braak miss",
+                           paste("Cerad", c(0:3, "miss")),
+                           paste("TDP", c(0:3, "miss")))
+colabel <- c("Braak 0-2/Cerad 0", "Braak 0-2/Cerad 1", "Braak 0-2/Cerad 2", "Braak 0-2/Cerad 3",
+             "Braak 3-4/Cerad 0","Braak 3-4/Cerad 1","Braak 3-4/Cerad 2","Braak 3-4/Cerad 3",
+             "Braak 5-6/Cerad 1","Braak 5-6/Cerad 2","Braak 5-6/Cerad 3",
+             "Braak/Cerad Missing")
+
+dimnames(ctable) =  list(clabel, colnamestabs)
+dimnames(copathtable) = list(colabel, colnamestabs)
+
+
+@
+
+
+<<tab1, results = tex>>=
+for(i in c(1,3,5,7)){ctable[,i] = -ctable[,i]}
+tab1 = xtable(ctable,caption = 'Coefficients for a 1 unit decrease in cognitive score.All models are stratified by study, the adjusted models contain sex, apoe4, smoking, education, vascular score and follow-up year as covariates.',label = "fittab")
+names(tab1) = colnames(ctable)
+tab1
+
+end1 = c("Braak 0-2", "Braak 3-4", "Braak 5-6", "Braak miss")
+end2 = paste("Cerad", c(0:3, "miss"))
+end3 = paste("TDP", c(0:3, "miss"))
+
+
+e1 = ggplot(data.frame(ctable)[1:4,1:2],aes(x = c(end1), y = Global_UnAdj))+
+  geom_line()+
+  geom_point(shape = 21, fill = 'white')+
+  geom_errorbar(aes(ymin=Global_UnAdj-1.96*Global_SE, ymax=Global_UnAdj+1.96*Global_SE), colour="black", width=.1)+
+  xlab("End Stage")+ylab('Coefficient')
+e2 = ggplot(data.frame(ctable)[5:9,1:2],aes(x = c(end2), y = Global_UnAdj))+
+  geom_line()+
+  geom_point(shape = 21, fill = 'white')+
+  geom_errorbar(aes(ymin=Global_UnAdj-1.96*Global_SE, ymax=Global_UnAdj+1.96*Global_SE), colour="black", width=.1)+
+  xlab("End Stage")+ylab('Coefficient')
+e3 = ggplot(data.frame(ctable)[10:14,1:2],aes(x = c(end3), y = Global_UnAdj))+
+  geom_line()+
+  geom_point(shape = 21, fill = 'white')+
+  geom_errorbar(aes(ymin=Global_UnAdj-1.96*Global_SE, ymax=Global_UnAdj+1.96*Global_SE), colour="black", width=.1)+
+  xlab("End Stage")+ylab('Coefficient')
+
+e1
+e2
+e3
+@
+
+<<tab2,results = tex>>=
+for(i in c(1,3,5,7)){copathtable[,i] = -copathtable[,i]}
+tab2 = xtable(copathtable,caption = 'Copathology: Coefficients for a 1 unit decrease in cognitive score.All models are stratified by study, the adjusted models contain sex, apoe4, smoking, education, vascular score and follow-up year as covariates.',label = "fittab1")
+names(tab2) = colnames(copathtable)
+tab2
+e4 = ggplot(data.frame(copathtable)[,1:2],aes(x = c(colabel), y = Global_UnAdj))+
+  geom_line()+
+  geom_point(shape = 21, fill = 'white')+
+  geom_errorbar(aes(ymin=Global_UnAdj-1.96*Global_SE, ymax=Global_UnAdj+1.96*Global_SE), colour="black", width=.1)+
+  xlab("End Stage")+ylab('Coefficient')
+e4
+@
+
+
+Table \ref{fittab} contains Cox model fits for all endpoints, using both
+simple and unadjusted models.
+
+It differs slightly from the earlier one due to the data corrections
+and the addition of follow-up year to the adjusters.
+The coefficients for the adjusted models differ little from the unadjusted
+ones.  Though the former fit the data better, the impact of cognitive score
+on prediction does not appear to be affected by confounding.
+If we compare coefficients for the overall fit of time to death with those
+for death with a missing Braak, Cerad or TDP score the differences are
+overall very minor, which indicates that with respect to cognition the
+missing values are not a selected subset. 
+(There is perhaps a hint between a low \code{cogn\_po} score and missing.)
+
+Looking at the coefficient of global cognition across Braak endpoint, we
+see that a 1 unit decrease in the global score predicts a 
+\Sexpr{round(exp(-ctable[1,1]), 1)} fold increase in risk for Braak 0--2
+death, a \Sexpr{round(exp(-ctable[2,1]), 1)} increase for Braak 3--4 death
+and a \Sexpr{round(exp(-ctable[3,1]), 1)} fold increase in the hazard for
+Braak 5--6 death, as compared to other subjects.  
+
+Table \ref{fittab1} contains Cox model fits for all CoPath endpoints, using both simple and unadjusted models.
+
+\end{document}
+
+
